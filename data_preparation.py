@@ -1,12 +1,13 @@
+import csv
 import datetime
 
 from pathlib import Path
 from math import radians, sin, cos, sqrt, atan2
 
 import pandas as pd
-import numpy as np
+from logger import logger
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class Station:
@@ -18,14 +19,17 @@ class Station:
 
 @dataclass
 class Measurement:
-    path: str
-    station: Station
-    latitude_mes: float
-    longitude_mes: float
-    date: datetime.datetime
-    depths: list[float]
-    temperatures: list[float]
-    mean_data: dict[float] # mean_depth: mean_temperatures
+    path: str = 'unknown'
+    station: Station = 'unknown'
+    latitude_mes: float = 0
+    longitude_mes: float = 0
+    date: datetime.datetime = 'unknown'
+    depths: list[float] = field(default_factory=list)
+    mean_depths: list[float] = field(default_factory=list)
+    temperatures: list[float] = field(default_factory=list)
+    mean_temperatures: list[float] = field(default_factory=list)
+    weighted_mean_temperatures: list[float] = field(default_factory=list) #mean_depth: mean_temperatures средневзвешенная
+    mean_data: dict[float] = field(default_factory=list) # mean_depth: mean_temperatures
 
 
 class StationSelector:
@@ -81,11 +85,25 @@ def calculate_distance_by_coordinate(latitude, longitude, latitude_mes, longitud
 
     return result
 
+def is_valid_date_format(date_string):
+    formats = [
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%d %H:%M',
+        '%d.%m.%Y %H:%M:%S',
+        '%d.%m.%Y %H:%M'
+         ]
+
+    for fmt in formats:
+        try:
+            date_obj = datetime.datetime.strptime(date_string, fmt)
+            return date_obj
+        except ValueError:
+            continue
 
 def data_preparation(path_to_file_table_stations, path_to_file_data, path_to_file_info, mid=None):
 
     file_table_stations = pd.read_excel(path_to_file_table_stations, sheet_name="Лист1")
-    file_data = pd.read_csv(path_to_file_data, sep=';', header=None)
+    #file_data = pd.read_csv(path_to_file_data, sep=';', header=None)
     file_info = pd.read_csv(path_to_file_info, sep=';')
 
     stations: list[Station] = []
@@ -109,58 +127,39 @@ def data_preparation(path_to_file_table_stations, path_to_file_data, path_to_fil
 
     for item in file_info.iterrows():
         path = item[1]['Path']
-        try:
-            date = datetime.datetime.strptime(item[1]['Start_Time'], "%d.%m.%Y %H:%M") #"%Y-%m-%d %H:%M:%S" ???
-        except:
-            date = None
+
+        row_date = item[1]['System_Upload_Date']
+
+        date = is_valid_date_format(row_date)
+
         latitude_mes = item[1]['Latitude']
         longitude_mes = item[1]['Longitude']
         station = selector(path , latitude_mes, longitude_mes)
         if station is None:
-            #print(f"Нет станции для времени: {path}")
+            logger.info("Нет станции для времени: %s", path)
             continue
-        measurement = Measurement(path=path, station=station, date=date, mean_data= {},
-                                  depths=[], temperatures=[], latitude_mes=latitude_mes, longitude_mes=longitude_mes)
+        measurement = Measurement(path=path, station=station, date=date,
+                                 latitude_mes=latitude_mes, longitude_mes=longitude_mes)
         measurements[path] = measurement
 
-    prev_path = None
-    data_list = []
-    for data in file_data.iterrows():
-        path = data[1][0]
-        if prev_path is not None and prev_path != path:
-            station = selector(prev_path)
+    with open(path_to_file_data, mode='r', newline='', encoding='utf-8') as file:
+        csv_reader = csv.reader(file, delimiter='\t')
+        for number, row in enumerate(csv_reader):
+            path = row.pop(0)
+            station = selector(path)
             if station is None:
-                #print(f"Нет станции для измерений: {prev_path}")
+                logger.info("Нет станции для измерений: %s", path)
                 pass
             else:
-                measurement = measurements.get(prev_path)
+                measurement = measurements.get(path)
                 if measurement is None:
-                    #print(f"Нет времени для измерения: {prev_path}")
+                    logger.info("Нет времени для измерения: %s", path)
                     pass
                 else:
-                    if not data_list[0][data_list[0]>= 500].empty:
-                        measurement.depths = data_list[0].to_list()
-                        measurement.temperatures = data_list[1].to_list()
+                    if len(row) >= 600:
+                        if number % 2 == 0:
+                            measurement.depths = [float(value) for value in row]
+                        else:
+                            measurement.temperatures = [float(value) for value in row]
 
-
-            data_list = []
-
-        data = data[1].dropna()
-        data = data.drop(labels=0)
-        data_list.append(data)
-        prev_path = path
-
-    if prev_path is not None:
-        station = selector(prev_path)
-        if station is None:
-            #print(f"Нет станции для времени: {prev_path}")
-            pass
-        else:
-            measurement = measurements.get(prev_path)
-            if measurement is None:
-                # print(f"Нет времени для измерения: {prev_path}")
-                pass
-            if not data_list[0][data_list[0] >= 500].empty:
-                measurement.depths = data_list[0].to_list()
-                measurement.temperatures = data_list[1].to_list()
     return measurements
